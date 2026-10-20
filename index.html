@@ -22,6 +22,8 @@
                 border-radius: 7px; cursor: pointer; text-decoration: none; }
   #go { background: #2563eb; color: #fff; }
   #go:hover { background: #1d4ed8; }
+  #panel-toggle { background: #f1f5f9; color: #1e293b; border: 1px solid #cbd5e1; }
+  #panel-toggle:hover { background: #e2e8f0; }
   #sv { background: #16a34a; color: #fff; display: none; align-items: center; }
   #sv:hover { background: #15803d; }
   #gmap { background: #f1f5f9; color: #1e293b; border: 1px solid #cbd5e1 !important; display: none; align-items: center; }
@@ -32,7 +34,27 @@
   .meta .err { color: #dc2626; font-weight: 600; }
   .meta .warn { color: #b45309; }
   .meta code { font-family: "SFMono-Regular", Consolas, Menlo, monospace; color: #0f172a; }
-  .stage { width: 100%; height: calc(100vh - 170px); min-height: 380px; background: #e2e8f0; }
+
+  .body-row { display: flex; width: 100%; height: calc(100vh - 170px); min-height: 380px; }
+  #panel { width: 280px; flex: 0 0 280px; background: #fff; border-right: 1px solid #e2e8f0;
+           display: flex; flex-direction: column; }
+  #panel.hidden { display: none; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between;
+                padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; }
+  .panel-head h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: #475569; }
+  .panel-head button { font-size: 0.75rem; color: #dc2626; background: none; border: none; cursor: pointer; font-weight: 600; }
+  #history { flex: 1; overflow-y: auto; }
+  .empty { padding: 1rem; font-size: 0.85rem; color: #94a3b8; line-height: 1.5; }
+  .hist-item { display: flex; align-items: center; border-bottom: 1px solid #f1f5f9; }
+  .hist-item .lbl { flex: 1; padding: 0.6rem 0.9rem; cursor: pointer; min-width: 0; }
+  .hist-item .lbl:hover { background: #eff6ff; }
+  .hist-item .lbl .g { font-family: "SFMono-Regular", Consolas, Menlo, monospace; font-size: 0.82rem; color: #0f172a; }
+  .hist-item .lbl .n { font-size: 0.78rem; color: #64748b; margin-top: 0.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hist-item .lbl .p { font-size: 0.76rem; color: #94a3b8; margin-top: 0.05rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hist-item .rm { padding: 0 0.7rem; color: #cbd5e1; background: none; border: none; cursor: pointer; font-size: 1.1rem; line-height: 1; }
+  .hist-item .rm:hover { color: #dc2626; }
+
+  .stage { flex: 1; position: relative; background: #e2e8f0; min-width: 0; }
   #map { width: 100%; height: 100%; }
   .leaflet-container { background: #dfe6ee; }
 </style>
@@ -44,6 +66,7 @@
 </header>
 
 <div class="bar">
+  <button id="panel-toggle" title="Show/hide saved searches">&#9776; Saved</button>
   <input id="geoid" placeholder="e.g. 17031030702" autocomplete="off" spellcheck="false">
   <button id="go">Go</button>
   <a id="sv" class="btn" target="_blank" rel="noopener">Street View &#8599;</a>
@@ -52,7 +75,16 @@
 
 <div class="meta" id="meta">Enter a GEOID and press Go.</div>
 
-<div class="stage"><div id="map"></div></div>
+<div class="body-row">
+  <aside id="panel">
+    <div class="panel-head">
+      <h2>Saved searches</h2>
+      <button id="clear-hist">Clear all</button>
+    </div>
+    <div id="history"></div>
+  </aside>
+  <div class="stage"><div id="map"></div></div>
+</div>
 
 <script src="tract_coords.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -60,6 +92,7 @@
 <script>
   var DB = window.TRACT_COORDS || {};
   var map, baseStreets, baseSat, tractLayer = null, pin = null;
+  var HKEY = "tract_history", MAX = 100;
   var $ = function (id) { return document.getElementById(id); };
 
   // ---- basemaps: all keyless (Esri arcgisonline) ----
@@ -73,36 +106,96 @@
     "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
     { maxZoom: 19 });
   var satLabeled = L.layerGroup([baseSat, labels]);
-
   map = L.map("map", { center: [39.5, -98.35], zoom: 4, layers: [baseStreets] });
   L.control.layers({ "Street map": baseStreets, "Satellite": satLabeled }, null,
                    { position: "topright", collapsed: false }).addTo(map);
 
+  // ---- saved-search history (localStorage) ----
+  function loadHist() { try { return JSON.parse(localStorage.getItem(HKEY)) || []; } catch (e) { return []; } }
+  function saveHist(a) { try { localStorage.setItem(HKEY, JSON.stringify(a)); } catch (e) {} }
+  function addHist(geoid) {
+    var a = loadHist().filter(function (x) { return x.geoid !== geoid; });
+    a.unshift({ geoid: geoid, name: null, place: null });
+    if (a.length > MAX) a = a.slice(0, MAX);
+    saveHist(a); renderHist();
+  }
+  function updateHist(geoid, fields) {
+    var a = loadHist(), hit = false;
+    a.forEach(function (x) {
+      if (x.geoid === geoid) { for (var k in fields) if (fields[k]) x[k] = fields[k]; hit = true; }
+    });
+    if (hit) { saveHist(a); renderHist(); }
+  }
+  function renderHist() {
+    var a = loadHist(), box = $("history");
+    if (!a.length) { box.innerHTML = '<div class="empty">No saved searches yet. Each GEOID you look up is saved here automatically.</div>'; return; }
+    box.innerHTML = "";
+    a.forEach(function (x) {
+      var row = document.createElement("div"); row.className = "hist-item";
+      var lbl = document.createElement("div"); lbl.className = "lbl";
+      lbl.innerHTML = '<div class="g">' + x.geoid + '</div>' +
+                      (x.name ? '<div class="n">' + x.name + '</div>' : '') +
+                      (x.place ? '<div class="p">' + x.place + '</div>' : '');
+      lbl.addEventListener("click", function () { $("geoid").value = x.geoid; lookup(); });
+      var rm = document.createElement("button"); rm.className = "rm"; rm.innerHTML = "&times;"; rm.title = "Remove";
+      rm.addEventListener("click", function (e) {
+        e.stopPropagation();
+        saveHist(loadHist().filter(function (y) { return y.geoid !== x.geoid; })); renderHist();
+      });
+      row.appendChild(lbl); row.appendChild(rm); box.appendChild(row);
+    });
+  }
+
+  // ---- JSONP (Census geocoder is not CORS-enabled, but supports callbacks) ----
+  function jsonp(url, cb) {
+    var name = "__geo_" + Date.now() + "_" + Math.floor(Math.random() * 1e5);
+    var s = document.createElement("script");
+    var done = function (data) { try { cb(data); } finally { delete window[name]; if (s.parentNode) s.parentNode.removeChild(s); } };
+    window[name] = done;
+    s.onerror = function () { done(null); };
+    s.src = url + (url.indexOf("?") > -1 ? "&" : "?") + "format=jsonp&callback=" + name;
+    document.body.appendChild(s);
+    setTimeout(function () { if (window[name]) done(null); }, 9000);
+  }
+  function tidyPlace(n) {
+    return (n || "").replace(/\s+(city|town|village|borough|CDP|municipality)$/i, "");
+  }
+  function geocodeLocality(lat, lon, cb) {
+    var url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates?x=" + lon +
+              "&y=" + lat + "&benchmark=Public_AR_Current&vintage=Current_Current";
+    jsonp(url, function (data) {
+      if (!data || !data.result || !data.result.geographies) return cb(null);
+      var g = data.result.geographies, pick = function (k) { return (g[k] && g[k][0] && g[k][0].NAME) || ""; };
+      var place = tidyPlace(pick("Incorporated Places") || pick("County Subdivisions"));
+      var county = pick("Counties");
+      var st = (g["States"] && g["States"][0] && g["States"][0].STUSAB) || "";
+      var parts = [];
+      if (place) parts.push(place);
+      if (county) parts.push(county);
+      if (st) parts.push(st);
+      cb(parts.join(", ") || null);
+    });
+  }
+
   function normGeoid(raw) {
     var g = (raw || "").replace(/[^0-9]/g, "");
-    if (g.length === 10) g = "0" + g;      // restore a dropped leading zero
+    if (g.length === 10) g = "0" + g;
     return g;
   }
-  function panoUrl(lat, lon) {
-    return "https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=" + lat + "," + lon;
-  }
-  function gmapUrl(lat, lon) {
-    return "https://www.google.com/maps/search/?api=1&query=" + lat + "," + lon;
-  }
+  function panoUrl(lat, lon) { return "https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=" + lat + "," + lon; }
+  function gmapUrl(lat, lon) { return "https://www.google.com/maps/search/?api=1&query=" + lat + "," + lon; }
 
   function drawBoundary(g) {
     var url = "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Tracts_Blocks/" +
-              "MapServer/0/query?where=GEOID='" + g + "'&outFields=GEOID,NAME&returnGeometry=true" +
-              "&outSR=4326&f=json";
+              "MapServer/0/query?where=GEOID='" + g + "'&outFields=GEOID,NAME&returnGeometry=true&outSR=4326&f=json";
     return fetch(url).then(function (r) { return r.json(); }).then(function (data) {
       if (tractLayer) { map.removeLayer(tractLayer); tractLayer = null; }
       var f = data && data.features && data.features[0];
       if (!f || !f.geometry || !f.geometry.rings) return null;
       var rings = f.geometry.rings.map(function (ring) {
-        return ring.map(function (pt) { return [pt[1], pt[0]]; });   // [lng,lat] -> [lat,lng]
+        return ring.map(function (pt) { return [pt[1], pt[0]]; });
       });
-      tractLayer = L.polygon(rings, { color: "#2563eb", weight: 3, fillColor: "#2563eb",
-                                      fillOpacity: 0.12 }).addTo(map);
+      tractLayer = L.polygon(rings, { color: "#2563eb", weight: 3, fillColor: "#2563eb", fillOpacity: 0.12 }).addTo(map);
       map.fitBounds(tractLayer.getBounds(), { padding: [30, 30] });
       return (f.attributes && f.attributes.NAME) || null;
     });
@@ -111,33 +204,49 @@
   function lookup() {
     var g = normGeoid($("geoid").value);
     var meta = $("meta");
-    if (g.length !== 11) {
-      meta.innerHTML = '<span class="err">Enter an 11-digit tract GEOID (got ' + g.length + ').</span>';
-      return;
-    }
+    if (g.length !== 11) { meta.innerHTML = '<span class="err">Enter an 11-digit tract GEOID (got ' + g.length + ').</span>'; return; }
     var c = DB[g];
     if (!c) { meta.innerHTML = '<span class="err">GEOID ' + g + ' not found in the 2024 gazetteer.</span>'; return; }
 
     map.setView([c[0], c[1]], 15);
     if (pin) map.removeLayer(pin);
-    pin = L.circleMarker([c[0], c[1]], { radius: 5, color: "#0f172a", weight: 2,
-                                         fillColor: "#f8fafc", fillOpacity: 1 }).addTo(map);
+    pin = L.circleMarker([c[0], c[1]], { radius: 5, color: "#0f172a", weight: 2, fillColor: "#f8fafc", fillOpacity: 1 }).addTo(map);
     $("sv").href = panoUrl(c[0], c[1]);   $("sv").style.display = "inline-flex";
     $("gmap").href = gmapUrl(c[0], c[1]); $("gmap").style.display = "inline-flex";
 
+    addHist(g);   // save immediately; name + place fill in below
+
     var base = 'Tract <code>' + g + '</code> &nbsp;·&nbsp; county ' + g.slice(0, 5) +
                ' &nbsp;·&nbsp; <code>' + c[0] + ', ' + c[1] + '</code>';
-    meta.innerHTML = base + ' &nbsp;·&nbsp; <span class="warn">loading boundary&hellip;</span>';
+    meta.innerHTML = base + ' &nbsp;·&nbsp; <span class="warn">loading&hellip;</span>';
+    var state = { name: "", place: "" };
+    function paintMeta() {
+      meta.innerHTML = base + (state.name ? ' &nbsp;·&nbsp; ' + state.name : '') +
+                       (state.place ? ' &nbsp;·&nbsp; ' + state.place : '');
+    }
+
     drawBoundary(g).then(function (name) {
-      meta.innerHTML = base + (name ? ' &nbsp;·&nbsp; ' + name : '');
+      state.name = name || ""; paintMeta(); updateHist(g, { name: name });
     }).catch(function () {
-      meta.innerHTML = base + ' &nbsp;·&nbsp; <span class="warn">boundary unavailable (offline/blocked) — showing point only</span>';
+      meta.innerHTML = base + ' &nbsp;·&nbsp; <span class="warn">boundary unavailable (offline/blocked)</span>';
+    });
+
+    geocodeLocality(c[0], c[1], function (place) {
+      if (place) { state.place = place; paintMeta(); updateHist(g, { place: place }); }
     });
   }
 
   $("go").addEventListener("click", lookup);
   $("geoid").addEventListener("keydown", function (e) { if (e.key === "Enter") lookup(); });
+  $("panel-toggle").addEventListener("click", function () {
+    $("panel").classList.toggle("hidden");
+    setTimeout(function () { map.invalidateSize(); }, 50);
+  });
+  $("clear-hist").addEventListener("click", function () {
+    if (confirm("Clear all saved searches?")) { saveHist([]); renderHist(); }
+  });
 
+  renderHist();
   $("geoid").focus();
   if (!Object.keys(DB).length) {
     $("meta").innerHTML = '<span class="err">tract_coords.js did not load — keep it in the same folder as this file.</span>';
