@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Census Tract Map &amp; Street View</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         color: #1e293b; background: #f1f5f9; }
+  header { background: #0f172a; color: #f1f5f9; padding: 1rem 1.5rem; }
+  header h1 { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.01em; }
+  header p { font-size: 0.82rem; color: #94a3b8; margin-top: 0.2rem; }
+  .bar { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center;
+         padding: 1rem 1.5rem; background: #fff; border-bottom: 1px solid #e2e8f0; }
+  .bar input { font-size: 1rem; font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+               padding: 0.55rem 0.75rem; border: 1px solid #cbd5e1; border-radius: 7px; width: 220px; }
+  .bar input:focus { outline: 2px solid #2563eb; border-color: #2563eb; }
+  .bar button, .bar a.btn { font-size: 0.9rem; font-weight: 600; padding: 0.55rem 1rem; border: none;
+                border-radius: 7px; cursor: pointer; text-decoration: none; }
+  #go { background: #2563eb; color: #fff; }
+  #go:hover { background: #1d4ed8; }
+  #sv { background: #16a34a; color: #fff; display: none; align-items: center; }
+  #sv:hover { background: #15803d; }
+  #gmap { background: #f1f5f9; color: #1e293b; border: 1px solid #cbd5e1 !important; display: none; align-items: center; }
+  #gmap:hover { background: #e2e8f0; }
+  .meta { padding: 0.5rem 1.5rem; font-size: 0.85rem; color: #475569; background: #fff;
+          border-bottom: 1px solid #e2e8f0; min-height: 2.1rem; display: flex; align-items: center;
+          gap: 1.1rem; flex-wrap: wrap; }
+  .meta .err { color: #dc2626; font-weight: 600; }
+  .meta .warn { color: #b45309; }
+  .meta code { font-family: "SFMono-Regular", Consolas, Menlo, monospace; color: #0f172a; }
+  .stage { width: 100%; height: calc(100vh - 170px); min-height: 380px; background: #e2e8f0; }
+  #map { width: 100%; height: 100%; }
+  .leaflet-container { background: #dfe6ee; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Census Tract &mdash; Map &amp; Street View</h1>
+  <p>Type an 11-digit tract GEOID to see its boundary; Street View opens in Google Maps.</p>
+</header>
+
+<div class="bar">
+  <input id="geoid" placeholder="e.g. 17031030702" autocomplete="off" spellcheck="false">
+  <button id="go">Go</button>
+  <a id="sv" class="btn" target="_blank" rel="noopener">Street View &#8599;</a>
+  <a id="gmap" class="btn" target="_blank" rel="noopener">Open in Google Maps &#8599;</a>
+</div>
+
+<div class="meta" id="meta">Enter a GEOID and press Go.</div>
+
+<div class="stage"><div id="map"></div></div>
+
+<script src="tract_coords.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+  var DB = window.TRACT_COORDS || {};
+  var map, baseStreets, baseSat, tractLayer = null, pin = null;
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ---- basemaps: all keyless (Esri arcgisonline) ----
+  baseStreets = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 19, attribution: "&copy; Esri &mdash; Esri, HERE, Garmin, OpenStreetMap contributors" });
+  baseSat = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 19, attribution: "Imagery &copy; Esri, Maxar, Earthstar Geographics" });
+  var labels = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 19 });
+  var satLabeled = L.layerGroup([baseSat, labels]);
+
+  map = L.map("map", { center: [39.5, -98.35], zoom: 4, layers: [baseStreets] });
+  L.control.layers({ "Street map": baseStreets, "Satellite": satLabeled }, null,
+                   { position: "topright", collapsed: false }).addTo(map);
+
+  function normGeoid(raw) {
+    var g = (raw || "").replace(/[^0-9]/g, "");
+    if (g.length === 10) g = "0" + g;      // restore a dropped leading zero
+    return g;
+  }
+  function panoUrl(lat, lon) {
+    return "https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=" + lat + "," + lon;
+  }
+  function gmapUrl(lat, lon) {
+    return "https://www.google.com/maps/search/?api=1&query=" + lat + "," + lon;
+  }
+
+  function drawBoundary(g) {
+    var url = "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Tracts_Blocks/" +
+              "MapServer/0/query?where=GEOID='" + g + "'&outFields=GEOID,NAME&returnGeometry=true" +
+              "&outSR=4326&f=json";
+    return fetch(url).then(function (r) { return r.json(); }).then(function (data) {
+      if (tractLayer) { map.removeLayer(tractLayer); tractLayer = null; }
+      var f = data && data.features && data.features[0];
+      if (!f || !f.geometry || !f.geometry.rings) return null;
+      var rings = f.geometry.rings.map(function (ring) {
+        return ring.map(function (pt) { return [pt[1], pt[0]]; });   // [lng,lat] -> [lat,lng]
+      });
+      tractLayer = L.polygon(rings, { color: "#2563eb", weight: 3, fillColor: "#2563eb",
+                                      fillOpacity: 0.12 }).addTo(map);
+      map.fitBounds(tractLayer.getBounds(), { padding: [30, 30] });
+      return (f.attributes && f.attributes.NAME) || null;
+    });
+  }
+
+  function lookup() {
+    var g = normGeoid($("geoid").value);
+    var meta = $("meta");
+    if (g.length !== 11) {
+      meta.innerHTML = '<span class="err">Enter an 11-digit tract GEOID (got ' + g.length + ').</span>';
+      return;
+    }
+    var c = DB[g];
+    if (!c) { meta.innerHTML = '<span class="err">GEOID ' + g + ' not found in the 2024 gazetteer.</span>'; return; }
+
+    map.setView([c[0], c[1]], 15);
+    if (pin) map.removeLayer(pin);
+    pin = L.circleMarker([c[0], c[1]], { radius: 5, color: "#0f172a", weight: 2,
+                                         fillColor: "#f8fafc", fillOpacity: 1 }).addTo(map);
+    $("sv").href = panoUrl(c[0], c[1]);   $("sv").style.display = "inline-flex";
+    $("gmap").href = gmapUrl(c[0], c[1]); $("gmap").style.display = "inline-flex";
+
+    var base = 'Tract <code>' + g + '</code> &nbsp;·&nbsp; county ' + g.slice(0, 5) +
+               ' &nbsp;·&nbsp; <code>' + c[0] + ', ' + c[1] + '</code>';
+    meta.innerHTML = base + ' &nbsp;·&nbsp; <span class="warn">loading boundary&hellip;</span>';
+    drawBoundary(g).then(function (name) {
+      meta.innerHTML = base + (name ? ' &nbsp;·&nbsp; ' + name : '');
+    }).catch(function () {
+      meta.innerHTML = base + ' &nbsp;·&nbsp; <span class="warn">boundary unavailable (offline/blocked) — showing point only</span>';
+    });
+  }
+
+  $("go").addEventListener("click", lookup);
+  $("geoid").addEventListener("keydown", function (e) { if (e.key === "Enter") lookup(); });
+
+  $("geoid").focus();
+  if (!Object.keys(DB).length) {
+    $("meta").innerHTML = '<span class="err">tract_coords.js did not load — keep it in the same folder as this file.</span>';
+  }
+</script>
+</body>
+</html>
